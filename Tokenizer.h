@@ -19,6 +19,12 @@ public:
     // primary
     Identifier = -4,
     Number = -5,
+    If = -6,
+    Then = -7,
+    Else = -8,
+    For = -9,
+    In = -10,
+    Var = -11
   };
 
   int GetTok();
@@ -37,6 +43,9 @@ public:
   std::unique_ptr<FunctionAST> ParseDefinition();
   std::unique_ptr<PrototypeAST> ParseExtern();
   std::unique_ptr<FunctionAST> ParseTopLevelExpr();
+  std::unique_ptr<ExprAST> ParseIfExpr();
+  std::unique_ptr<ExprAST> ParseForExpr();
+  std::unique_ptr<ExprAST> ParseVarExpr();
 
   void HandleDefinition();
   void HandleExtern();
@@ -46,12 +55,12 @@ public:
 
   int &operator[](std::size_t idx) { return BinopPrecedence[idx]; }
 
-  static Tokenizer *GetInstance();
+  static std::unique_ptr<Tokenizer> &GetInstance();
 
 protected:
   Tokenizer() { GetNextToken(); }
 
-  static Tokenizer *singleton_;
+  static std::unique_ptr<Tokenizer> singleton_;
 
 private:
   int LastChar = ' ';

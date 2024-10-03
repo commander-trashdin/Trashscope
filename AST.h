@@ -5,14 +5,22 @@
 #include "llvm/IR/DerivedTypes.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/IRBuilder.h"
+#include "llvm/IR/Instructions.h"
 #include "llvm/IR/LLVMContext.h"
 #include "llvm/IR/Module.h"
 #include "llvm/IR/Type.h"
-#include "llvm/IR/Verifier.h"
+
+#include "llvm/Support/TargetSelect.h"
+#include "llvm/Target/TargetMachine.h"
+
+#include <llvm/IR/Verifier.h>
+
 #include <map>
 #include <memory>
 #include <string>
 #include <vector>
+
+#include "Optimizer.h"
 
 #pragma once
 
@@ -36,9 +44,19 @@ public:
     return *TheModule;
   }
 
-  static std::map<std::string, llvm::Value *> &getNamedValues() {
-    static std::map<std::string, llvm::Value *> NamedValues;
+  static std::map<std::string, llvm::AllocaInst *> &getNamedValues() {
+    static std::map<std::string, llvm::AllocaInst *> NamedValues;
     return NamedValues;
+  }
+
+  /// CreateEntryBlockAlloca - Create an alloca instruction in the entry block
+  /// of the function.  This is used for mutable variables etc.
+  static llvm::AllocaInst *CreateEntryBlockAlloca(llvm::Function *TheFunction,
+                                                  const std::string &VarName) {
+    llvm::IRBuilder<> TmpB(&TheFunction->getEntryBlock(),
+                           TheFunction->getEntryBlock().begin());
+    return TmpB.CreateAlloca(llvm::Type::getDoubleTy(getContext()), nullptr,
+                             VarName);
   }
 };
 
@@ -64,6 +82,8 @@ class VariableExprAST : public ExprAST {
 public:
   VariableExprAST(const std::string &Name) : Name(Name) {}
   llvm::Value *codegen() override;
+
+  [[nodiscard]] const std::string &getName() const { return Name; }
 };
 
 /// BinaryExprAST - Expression class for a binary operator.
@@ -101,7 +121,7 @@ public:
   PrototypeAST(const std::string &Name, std::vector<std::string> Args)
       : Name(Name), Args(std::move(Args)) {}
 
-  const std::string &getName() const { return Name; }
+  [[nodiscard]] const std::string &getName() const { return Name; }
   llvm::Function *codegen();
 };
 
@@ -115,4 +135,43 @@ public:
               std::unique_ptr<ExprAST> Body)
       : Proto(std::move(Proto)), Body(std::move(Body)) {}
   llvm::Function *codegen();
+};
+
+class IfExprAST : public ExprAST {
+  std::unique_ptr<ExprAST> Cond, Then, Else;
+
+public:
+  IfExprAST(std::unique_ptr<ExprAST> Cond, std::unique_ptr<ExprAST> Then,
+            std::unique_ptr<ExprAST> Else)
+      : Cond(std::move(Cond)), Then(std::move(Then)), Else(std::move(Else)) {}
+
+  llvm::Value *codegen() override;
+};
+
+class ForExprAST : public ExprAST {
+  std::string VarName;
+  std::unique_ptr<ExprAST> Start, End, Step, Body;
+
+public:
+  ForExprAST(const std::string &VarName, std::unique_ptr<ExprAST> Start,
+             std::unique_ptr<ExprAST> End, std::unique_ptr<ExprAST> Step,
+             std::unique_ptr<ExprAST> Body)
+      : VarName(VarName), Start(std::move(Start)), End(std::move(End)),
+        Step(std::move(Step)), Body(std::move(Body)) {}
+
+  llvm::Value *codegen() override;
+};
+
+/// VarExprAST - Expression class for var/in
+class VarExprAST : public ExprAST {
+  std::vector<std::pair<std::string, std::unique_ptr<ExprAST>>> VarNames;
+  std::unique_ptr<ExprAST> Body;
+
+public:
+  VarExprAST(
+      std::vector<std::pair<std::string, std::unique_ptr<ExprAST>>> VarNames,
+      std::unique_ptr<ExprAST> Body)
+      : VarNames(std::move(VarNames)), Body(std::move(Body)) {}
+
+  llvm::Value *codegen() override;
 };

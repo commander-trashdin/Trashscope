@@ -1,7 +1,7 @@
 #include "Tokenizer.h"
 #include "errors.h"
 
-Tokenizer *Tokenizer::singleton_;
+std::unique_ptr<Tokenizer> Tokenizer::singleton_ = nullptr;
 
 int Tokenizer::GetTok() {
   // Skip any whitespace.
@@ -17,6 +17,19 @@ int Tokenizer::GetTok() {
       return Def;
     if (IdentifierStr == "extern")
       return Extern;
+    if (IdentifierStr == "if")
+      return If;
+    if (IdentifierStr == "then")
+      return Then;
+    if (IdentifierStr == "else")
+      return Else;
+    if (IdentifierStr == "for")
+      return For;
+    if (IdentifierStr == "in")
+      return In;
+    if (IdentifierStr == "var")
+      return Var;
+
     return Identifier;
   }
 
@@ -27,7 +40,7 @@ int Tokenizer::GetTok() {
       LastChar = getchar();
     } while (isdigit(LastChar) || LastChar == '.');
 
-    NumVal = strtod(NumStr.c_str(), 0);
+    NumVal = strtod(NumStr.c_str(), nullptr);
     return Number;
   }
 
@@ -50,9 +63,9 @@ int Tokenizer::GetTok() {
   return ThisChar;
 }
 
-Tokenizer *Tokenizer::GetInstance() {
+std::unique_ptr<Tokenizer> &Tokenizer::GetInstance() {
   if (singleton_ == nullptr) {
-    singleton_ = new Tokenizer();
+    singleton_ = std::unique_ptr<Tokenizer>(new Tokenizer());
   }
   return singleton_;
 }
@@ -114,14 +127,21 @@ std::unique_ptr<ExprAST> Tokenizer::ParseIdentifierExpr() {
 
 std::unique_ptr<ExprAST> Tokenizer::ParsePrimary() {
   switch (CurTok) {
-  default:
-    return LogError("unknown token when expecting an expression");
   case Identifier:
     return ParseIdentifierExpr();
   case Number:
     return ParseNumberExpr();
   case '(':
     return ParseParenExpr();
+  case If:
+    return ParseIfExpr();
+  case For:
+    return ParseForExpr();
+  case Var:
+    return ParseVarExpr();
+
+  default:
+    return LogError("unknown token when expecting an expression");
   }
 }
 
@@ -224,6 +244,127 @@ std::unique_ptr<FunctionAST> Tokenizer::ParseTopLevelExpr() {
     return std::make_unique<FunctionAST>(std::move(Proto), std::move(E));
   }
   return nullptr;
+}
+
+std::unique_ptr<ExprAST> Tokenizer::ParseIfExpr() {
+  GetNextToken(); // eat the if.
+
+  // condition.
+  auto Cond = ParseExpression();
+  if (!Cond)
+    return nullptr;
+
+  if (CurTok != Then)
+    return LogError("expected then");
+  GetNextToken(); // eat the then
+
+  auto Then = ParseExpression();
+  if (!Then)
+    return nullptr;
+
+  if (CurTok != Else)
+    return LogError("expected else");
+
+  GetNextToken();
+
+  auto Else = ParseExpression();
+  if (!Else)
+    return nullptr;
+
+  return std::make_unique<IfExprAST>(std::move(Cond), std::move(Then),
+                                     std::move(Else));
+}
+
+/// forexpr ::= 'for' identifier '=' expr ',' expr (',' expr)? 'in' expression
+std::unique_ptr<ExprAST> Tokenizer::ParseForExpr() {
+  GetNextToken(); // eat the for.
+
+  if (CurTok != Identifier)
+    return LogError("expected identifier after for");
+
+  std::string IdName = IdentifierStr;
+  GetNextToken(); // eat identifier.
+
+  if (CurTok != '=')
+    return LogError("expected '=' after for");
+  GetNextToken(); // eat '='.
+
+  auto Start = ParseExpression();
+  if (!Start)
+    return nullptr;
+  if (CurTok != ',')
+    return LogError("expected ',' after for start value");
+  GetNextToken();
+
+  auto End = ParseExpression();
+  if (!End)
+    return nullptr;
+
+  // The step value is optional.
+  std::unique_ptr<ExprAST> Step;
+  if (CurTok == ',') {
+    GetNextToken();
+    Step = ParseExpression();
+    if (!Step)
+      return nullptr;
+  }
+
+  if (CurTok != In)
+    return LogError("expected 'in' after for");
+  GetNextToken(); // eat 'in'.
+
+  auto Body = ParseExpression();
+  if (!Body)
+    return nullptr;
+
+  return std::make_unique<ForExprAST>(IdName, std::move(Start), std::move(End),
+                                      std::move(Step), std::move(Body));
+}
+
+std::unique_ptr<ExprAST> Tokenizer::ParseVarExpr() {
+  GetNextToken(); // eat the var.
+
+  std::vector<std::pair<std::string, std::unique_ptr<ExprAST>>> VarNames;
+
+  // At least one variable name is required.
+  if (CurTok != Identifier)
+    return LogError("expected identifier after var");
+
+  while (true) {
+    std::string Name = IdentifierStr;
+    GetNextToken(); // eat identifier.
+
+    // Read the optional initializer.
+    std::unique_ptr<ExprAST> Init;
+    if (CurTok == '=') {
+      GetNextToken(); // eat the '='.
+
+      Init = ParseExpression();
+      if (!Init)
+        return nullptr;
+    }
+
+    VarNames.emplace_back(Name, std::move(Init));
+
+    // End of var list, exit loop.
+    if (CurTok != ',')
+      break;
+    GetNextToken(); // eat the ','.
+
+    if (CurTok != Identifier)
+      return LogError("expected identifier list after var");
+  }
+
+  // At this point, we have to have 'in'.
+  if (CurTok != In)
+    return LogError("expected 'in' keyword after 'var'");
+  GetNextToken(); // eat 'in'.
+
+  auto Body = ParseExpression();
+  if (!Body)
+    return nullptr;
+
+  return std::make_unique<VarExprAST>(std::move(VarNames), std::move(Body));
 }
 
 void Tokenizer::HandleDefinition() {
