@@ -150,10 +150,11 @@ int Tokenizer::GetTokPrecedence() {
     return -1;
 
   // Make sure it's a declared binop.
-  int TokPrec = BinopPrecedence[CurTok];
-  if (TokPrec <= 0)
-    return -1;
-  return TokPrec;
+  if (auto search = BinopPrecedence.find(CurTok);
+      search != BinopPrecedence.end()) {
+    return search->second;
+  }
+  return -1;
 }
 
 std::unique_ptr<ExprAST> Tokenizer::ParseExpression() {
