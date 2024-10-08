@@ -2,16 +2,16 @@
 #include "errors.h"
 
 llvm::Value *NumberExprAST::codegen() {
-  return llvm::ConstantFP::get(AST::getContext(), llvm::APFloat(Val));
+  return llvm::ConstantFP::get(getContext(), llvm::APFloat(Val));
 }
 
 llvm::Value *VariableExprAST::codegen() {
   // Look this variable up in the function.
-  llvm::AllocaInst *V = AST::getNamedValues()[Name];
+  llvm::AllocaInst *V = getNamedValues()[Name];
   if (!V)
     LogErrorV("Unknown variable name");
 
-  return AST::getBuilder().CreateLoad(V->getAllocatedType(), V, Name.c_str());
+  return getBuilder().CreateLoad(V->getAllocatedType(), V, Name.c_str());
 }
 
 llvm::Value *BinaryExprAST::codegen() {
@@ -45,16 +45,16 @@ llvm::Value *BinaryExprAST::codegen() {
 
   switch (Op) {
   case '+':
-    return AST::getBuilder().CreateFAdd(L, R, "addtmp");
+    return getBuilder().CreateFAdd(L, R, "addtmp");
   case '-':
-    return AST::getBuilder().CreateFSub(L, R, "subtmp");
+    return getBuilder().CreateFSub(L, R, "subtmp");
   case '*':
-    return AST::getBuilder().CreateFMul(L, R, "multmp");
+    return getBuilder().CreateFMul(L, R, "multmp");
   case '<':
-    L = AST::getBuilder().CreateFCmpULT(L, R, "cmptmp");
+    L = getBuilder().CreateFCmpULT(L, R, "cmptmp");
     // Convert bool 0/1 to double 0.0 or 1.0
-    return AST::getBuilder().CreateUIToFP(
-        L, llvm::Type::getDoubleTy(AST::getContext()), "booltmp");
+    return getBuilder().CreateUIToFP(L, llvm::Type::getDoubleTy(getContext()),
+                                     "booltmp");
   default:
     return LogErrorV("invalid binary operator");
   }
@@ -62,7 +62,7 @@ llvm::Value *BinaryExprAST::codegen() {
 
 llvm::Value *CallExprAST::codegen() {
   // Look up the name in the global module table.
-  llvm::Function *CalleeF = AST::getModule().getFunction(Callee);
+  llvm::Function *CalleeF = getModule().getFunction(Callee);
   if (!CalleeF)
     return LogErrorV("Unknown function referenced");
 
@@ -77,7 +77,7 @@ llvm::Value *CallExprAST::codegen() {
       return nullptr;
   }
 
-  return AST::getBuilder().CreateCall(CalleeF, ArgsV, "calltmp");
+  return getBuilder().CreateCall(CalleeF, ArgsV, "calltmp");
 }
 
 llvm::Function *PrototypeAST::codegen() {
@@ -152,47 +152,43 @@ llvm::Value *IfExprAST::codegen() {
   if (!CondV)
     return nullptr;
 
-  CondV = AST::getBuilder().CreateFCmpONE(
-      CondV, llvm::ConstantFP::get(AST::getContext(), llvm::APFloat(0.0)),
-      "ifcond");
+  CondV = getBuilder().CreateFCmpONE(
+      CondV, llvm::ConstantFP::get(getContext(), llvm::APFloat(0.0)), "ifcond");
 
-  llvm::Function *ThisFunction =
-      AST::getBuilder().GetInsertBlock()->getParent();
+  llvm::Function *ThisFunction = getBuilder().GetInsertBlock()->getParent();
   llvm::BasicBlock *ThenBB =
-      llvm::BasicBlock::Create(AST::getContext(), "then", ThisFunction);
-  llvm::BasicBlock *ElseBB =
-      llvm::BasicBlock::Create(AST::getContext(), "else");
-  llvm::BasicBlock *MergeBB =
-      llvm::BasicBlock::Create(AST::getContext(), "ifcont");
+      llvm::BasicBlock::Create(getContext(), "then", ThisFunction);
+  llvm::BasicBlock *ElseBB = llvm::BasicBlock::Create(getContext(), "else");
+  llvm::BasicBlock *MergeBB = llvm::BasicBlock::Create(getContext(), "ifcont");
 
-  AST::getBuilder().CreateCondBr(CondV, ThenBB, ElseBB);
+  getBuilder().CreateCondBr(CondV, ThenBB, ElseBB);
 
-  AST::getBuilder().SetInsertPoint(ThenBB);
+  getBuilder().SetInsertPoint(ThenBB);
 
   llvm::Value *ThenV = Then->codegen();
   if (!ThenV)
     return nullptr;
 
-  AST::getBuilder().CreateBr(MergeBB);
+  getBuilder().CreateBr(MergeBB);
   // Codegen of 'Then' can change the current block, update ThenBB for the PHI.
-  ThenBB = AST::getBuilder().GetInsertBlock();
+  ThenBB = getBuilder().GetInsertBlock();
 
   // Emit else block.
   ThisFunction->insert(ThisFunction->end(), ElseBB);
-  AST::getBuilder().SetInsertPoint(ElseBB);
+  getBuilder().SetInsertPoint(ElseBB);
 
   llvm::Value *ElseV = Else->codegen();
   if (!ElseV)
     return nullptr;
 
-  AST::getBuilder().CreateBr(MergeBB);
+  getBuilder().CreateBr(MergeBB);
   // codegen of 'Else' can change the current block, update ElseBB for the PHI.
-  ElseBB = AST::getBuilder().GetInsertBlock();
+  ElseBB = getBuilder().GetInsertBlock();
 
   ThisFunction->insert(ThisFunction->end(), MergeBB);
-  AST::getBuilder().SetInsertPoint(MergeBB);
-  llvm::PHINode *PN = AST::getBuilder().CreatePHI(
-      llvm::Type::getDoubleTy(AST::getContext()), 2, "iftmp");
+  getBuilder().SetInsertPoint(MergeBB);
+  llvm::PHINode *PN =
+      getBuilder().CreatePHI(llvm::Type::getDoubleTy(getContext()), 2, "iftmp");
 
   PN->addIncoming(ThenV, ThenBB);
   PN->addIncoming(ElseV, ElseBB);
@@ -219,7 +215,7 @@ llvm::Value *ForExprAST::codegen() {
   getBuilder().CreateBr(LoopBB);
 
   // Start insertion in LoopBB.
-  AST::getBuilder().SetInsertPoint(LoopBB);
+  getBuilder().SetInsertPoint(LoopBB);
 
   // Within the loop, the variable is defined equal to the PHI node.  If it
   // shadows an existing variable, we have to restore it, so save it now.
