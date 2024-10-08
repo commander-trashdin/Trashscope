@@ -71,8 +71,8 @@ llvm::Value *CallExprAST::codegen() {
     return LogErrorV("Incorrect # arguments passed");
 
   std::vector<llvm::Value *> ArgsV;
-  for (unsigned i = 0, e = Args.size(); i != e; ++i) {
-    ArgsV.push_back(Args[i]->codegen());
+  for (auto &Arg : Args) {
+    ArgsV.push_back(Arg->codegen());
     if (!ArgsV.back())
       return nullptr;
   }
@@ -83,12 +83,12 @@ llvm::Value *CallExprAST::codegen() {
 llvm::Function *PrototypeAST::codegen() {
   // Make the function type:  double(double,double) etc.
   std::vector<llvm::Type *> Doubles(Args.size(),
-                                    llvm::Type::getDoubleTy(AST::getContext()));
+                                    llvm::Type::getDoubleTy(getContext()));
   llvm::FunctionType *FT = llvm::FunctionType::get(
-      llvm::Type::getDoubleTy(AST::getContext()), Doubles, false);
+      llvm::Type::getDoubleTy(getContext()), Doubles, false);
 
   llvm::Function *F = llvm::Function::Create(
-      FT, llvm::Function::ExternalLinkage, Name, AST::getModule());
+      FT, llvm::Function::ExternalLinkage, Name, getModule());
 
   // Set names for all arguments.
   unsigned Idx = 0;
