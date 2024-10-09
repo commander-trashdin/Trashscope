@@ -1673,6 +1673,7 @@ The short (and happy) summary of this chapter is that there is no need for your 
 
 To understand why mutable variables cause complexities in SSA construction, consider this extremely simple C example:
 
+```c
 int G, H;
 int test(_Bool Condition) {
   int X;
@@ -1682,9 +1683,11 @@ int test(_Bool Condition) {
     X = H;
   return X;
 }
+```
 
-In this case, we have the variable “X”, whose value depends on the path executed in the program. Because there are two different possible values for X before the return instruction, a PHI node is inserted to merge the two values. The LLVM IR that we want for this example looks like this:
+In this case, we have the variable `X`, whose value depends on the path executed in the program. Because there are two different possible values for `X` before the return instruction, a `PHI` node is inserted to merge the two values. The LLVM IR that we want for this example looks like this:
 
+```
 @G = weak global i32 0   ; type of @G is i32*
 @H = weak global i32 0   ; type of @H is i32*
 
@@ -1704,18 +1707,19 @@ cond_next:
   %X.2 = phi i32 [ %X.1, %cond_false ], [ %X.0, %cond_true ]
   ret i32 %X.2
 }
+```
 
-In this example, the loads from the G and H global variables are explicit in the LLVM IR, and they live in the then/else branches of the if statement (cond_true/cond_false). In order to merge the incoming values, the X.2 phi node in the cond_next block selects the right value to use based on where control flow is coming from: if control flow comes from the cond_false block, X.2 gets the value of X.1. Alternatively, if control flow comes from cond_true, it gets the value of X.0. The intent of this chapter is not to explain the details of SSA form. For more information, see one of the many online references.
+In this example, the loads from the `G` and `H` global variables are explicit in the LLVM IR, and they live in the then/else branches of the if statement (cond_true/cond_false). In order to merge the incoming values, the `X.2` phi node in the cond_next block selects the right value to use based on where control flow is coming from: if control flow comes from the cond_false block, `X.2` gets the value of `X.1`. Alternatively, if control flow comes from cond_true, it gets the value of `X.0`. The intent of this chapter is not to explain the details of SSA form. For more information, see one of the many online references.
 
 The question for this article is “who places the phi nodes when lowering assignments to mutable variables?”. The issue here is that LLVM requires that its IR be in SSA form: there is no “non-ssa” mode for it. However, SSA construction requires non-trivial algorithms and data structures, so it is inconvenient and wasteful for every front-end to have to reproduce this logic.
 
 #### 7.3. Memory in LLVM
 
-The ‘trick’ here is that while LLVM does require all register values to be in SSA form, it does not require (or permit) memory objects to be in SSA form. In the example above, note that the loads from G and H are direct accesses to G and H: they are not renamed or versioned. This differs from some other compiler systems, which do try to version memory objects. In LLVM, instead of encoding dataflow analysis of memory into the LLVM IR, it is handled with Analysis Passes which are computed on demand.
+The ‘trick’ here is that while LLVM does require all register values to be in SSA form, it does not require (or permit) memory objects to be in SSA form. In the example above, note that the loads from `G` and `H` are direct accesses to `G` and `H`: they are not renamed or versioned. This differs from some other compiler systems, which do try to version memory objects. In LLVM, instead of encoding dataflow analysis of memory into the LLVM IR, it is handled with Analysis Passes which are computed on demand.
 
 With this in mind, the high-level idea is that we want to make a stack variable (which lives in memory, because it is on the stack) for each mutable object in a function. To take advantage of this trick, we need to talk about how LLVM represents stack variables.
 
-In LLVM, all memory accesses are explicit with load/store instructions, and it is carefully designed not to have (or need) an “address-of” operator. Notice how the type of the @G/@H global variables is actually “i32*” even though the variable is defined as “i32”. What this means is that @G defines space for an i32 in the global data area, but its name actually refers to the address for that space. Stack variables work the same way, except that instead of being declared with global variable definitions, they are declared with the LLVM alloca instruction:
+In LLVM, all memory accesses are explicit with load/store instructions, and it is carefully designed not to have (or need) an `address-of` operator. Notice how the type of the `@G`/`@H` global variables is actually `i32*` even though the variable is defined as `i32`. What this means is that `@G` defines space for an `i32` in the global data area, but its name actually refers to the address for that space. Stack variables work the same way, except that instead of being declared with global variable definitions, they are declared with the LLVM alloca instruction:
 
 ```
 define i32 @example() {
@@ -1755,15 +1759,12 @@ cond_next:
 }
 ```
 
-With this, we have discovered a way to handle arbitrary mutable variables without the need to create Phi nodes at all:
-
-    Each mutable variable becomes a stack allocation.
-
-    Each read of the variable becomes a load from the stack.
-
-    Each update of the variable becomes a store to the stack.
-
-    Taking the address of a variable just uses the stack address directly.
+With this, we have discovered a way to handle arbitrary mutable variables without the need to create `Phi` nodes at all:
+ 
+ - Each mutable variable becomes a stack allocation.
+ - Each read of the variable becomes a load from the stack.
+ - Each update of the variable becomes a store to the stack.
+ - Taking the address of a variable just uses the stack address directly.
 
 While this solution has solved our immediate problem, it introduced another one: we have now apparently introduced a lot of stack traffic for very simple and common operations, a major performance problem. Fortunately for us, the LLVM optimizer has a highly-tuned optimization pass named “mem2reg” that handles this case, promoting allocas like this into SSA registers, inserting Phi nodes as appropriate. If you run this example through the pass, for example, you’ll get:
 
@@ -1790,23 +1791,18 @@ cond_next:
 }
 ```
 
-The mem2reg pass implements the standard “iterated dominance frontier” algorithm for constructing SSA form and has a number of optimizations that speed up (very common) degenerate cases. The mem2reg optimization pass is the answer to dealing with mutable variables, and we highly recommend that you depend on it. Note that mem2reg only works on variables in certain circumstances:
+The `mem2reg` pass implements the standard “iterated dominance frontier” algorithm for constructing SSA form and has a number of optimizations that speed up (very common) degenerate cases. The `mem2reg` optimization pass is the answer to dealing with mutable variables, and we highly recommend that you depend on it. Note that `mem2reg` only works on variables in certain circumstances:
 
-    mem2reg is alloca-driven: it looks for allocas and if it can handle them, it promotes them. It does not apply to global variables or heap allocations.
-
-    mem2reg only looks for alloca instructions in the entry block of the function. Being in the entry block guarantees that the alloca is only executed once, which makes analysis simpler.
-
-    mem2reg only promotes allocas whose uses are direct loads and stores. If the address of the stack object is passed to a function, or if any funny pointer arithmetic is involved, the alloca will not be promoted.
-
-    mem2reg only works on allocas of first class values (such as pointers, scalars and vectors), and only if the array size of the allocation is 1 (or missing in the .ll file). mem2reg is not capable of promoting structs or arrays to registers. Note that the “sroa” pass is more powerful and can promote structs, “unions”, and arrays in many cases.
+ - `mem2reg` is alloca-driven: it looks for allocas and if it can handle them, it promotes them. It does not apply to global variables or heap allocations.
+ - `mem2reg` only looks for alloca instructions in the entry block of the function. Being in the entry block guarantees that the alloca is only executed once, which makes analysis simpler.
+ - `mem2reg` only promotes allocas whose uses are direct loads and stores. If the address of the stack object is passed to a function, or if any funny pointer arithmetic is involved, the alloca will not be promoted.
+ - `mem2reg` only works on allocas of first class values (such as pointers, scalars and vectors), and only if the array size of the allocation is 1 (or missing in the .ll file). `mem2reg` is not capable of promoting structs or arrays to registers. Note that the `sroa` pass is more powerful and can promote structs, “unions”, and arrays in many cases.
 
 All of these properties are easy to satisfy for most imperative languages, and we’ll illustrate it below with Kaleidoscope. The final question you may be asking is: should I bother with this nonsense for my front-end? Wouldn’t it be better if I just did SSA construction directly, avoiding use of the mem2reg optimization pass? In short, we strongly recommend that you use this technique for building SSA form, unless there is an extremely good reason not to. Using this technique is:
 
-    Proven and well tested: clang uses this technique for local mutable variables. As such, the most common clients of LLVM are using this to handle a bulk of their variables. You can be sure that bugs are found fast and fixed early.
-
-    Extremely Fast: mem2reg has a number of special cases that make it fast in common cases as well as fully general. For example, it has fast-paths for variables that are only used in a single block, variables that only have one assignment point, good heuristics to avoid insertion of unneeded phi nodes, etc.
-
-    Needed for debug info generation: Debug information in LLVM relies on having the address of the variable exposed so that debug info can be attached to it. This technique dovetails very naturally with this style of debug info.
+ - Proven and well tested: clang uses this technique for local mutable variables. As such, the most common clients of LLVM are using this to handle a bulk of their variables. You can be sure that bugs are found fast and fixed early.
+ - Extremely Fast: `mem2reg` has a number of special cases that make it fast in common cases as well as fully general. For example, it has fast-paths for variables that are only used in a single block, variables that only have one assignment point, good heuristics to avoid insertion of unneeded phi nodes, etc.
+ - Needed for debug info generation: Debug information in LLVM relies on having the address of the variable exposed so that debug info can be attached to it. This technique dovetails very naturally with this style of debug info.
 
 If nothing else, this makes it much easier to get your front-end up and running, and is very simple to implement. Let’s extend Kaleidoscope with mutable variables now!
 
@@ -1814,11 +1810,11 @@ If nothing else, this makes it much easier to get your front-end up and running,
 
 Now that we know the sort of problem we want to tackle, let’s see what this looks like in the context of our little Kaleidoscope language. We’re going to add two features:
 
-    The ability to mutate variables with the ‘=’ operator.
-
-    The ability to define new variables.
+ - The ability to mutate variables with the `=` operator.
+ - The ability to define new variables.
 
 While the first item is really what this is about, we only have variables for incoming arguments as well as for induction variables, and redefining those only goes so far :). Also, the ability to define new variables is a useful thing regardless of whether you will be mutating them. Here’s a motivating example that shows how we could use these:
+
 ```
 # Define ':' for sequencing: as a low-precedence operator that ignores operands
 # and just returns the RHS.
@@ -1848,82 +1844,96 @@ In order to mutate variables, we have to change our existing variables to use th
 
 #### 7.5. Adjusting Existing Variables for Mutation
 
-The symbol table in Kaleidoscope is managed at code generation time by the ‘NamedValues’ map. This map currently keeps track of the LLVM “Value*” that holds the double value for the named variable. In order to support mutation, we need to change this slightly, so that NamedValues holds the memory location of the variable in question. Note that this change is a refactoring: it changes the structure of the code, but does not (by itself) change the behavior of the compiler. All of these changes are isolated in the Kaleidoscope code generator.
+The symbol table in Kaleidoscope is managed at code generation time by the `NamedValues` map. This map currently keeps track of the LLVM `Value*` that holds the double value for the named variable. In order to support mutation, we need to change this slightly, so that NamedValues holds the memory location of the variable in question. Note that this change is a refactoring: it changes the structure of the code, but does not (by itself) change the behavior of the compiler. All of these changes are isolated in the Kaleidoscope code generator.
 
-At this point in Kaleidoscope’s development, it only supports variables for two things: incoming arguments to functions and the induction variable of ‘for’ loops. For consistency, we’ll allow mutation of these variables in addition to other user-defined variables. This means that these will both need memory locations.
+At this point in Kaleidoscope’s development, it only supports variables for two things: incoming arguments to functions and the induction variable of `for` loops. For consistency, we’ll allow mutation of these variables in addition to other user-defined variables. This means that these will both need memory locations.
 
-To start our transformation of Kaleidoscope, we’ll change the NamedValues map so that it maps to AllocaInst* instead of Value*. Once we do this, the C++ compiler will tell us what parts of the code we need to update:
+To start our transformation of Kaleidoscope, we’ll change the NamedValues map so that it maps to `AllocaInst*` instead of `Value*`. Once we do this, the C++ compiler will tell us what parts of the code we need to update:
 
-static std::map<std::string, AllocaInst*> NamedValues;
-
+```c++
+  static std::map<std::string, llvm::AllocaInst *> &getNamedValues() {
+    static std::map<std::string, llvm::AllocaInst *> NamedValues;
+    return NamedValues;
+  }
+```
 Also, since we will need to create these allocas, we’ll use a helper function that ensures that the allocas are created in the entry block of the function:
 
-/// CreateEntryBlockAlloca - Create an alloca instruction in the entry block of
-/// the function.  This is used for mutable variables etc.
-static AllocaInst *CreateEntryBlockAlloca(Function *TheFunction,
-                                          const std::string &VarName) {
-  IRBuilder<> TmpB(&TheFunction->getEntryBlock(),
-                 TheFunction->getEntryBlock().begin());
-  return TmpB.CreateAlloca(Type::getDoubleTy(getContext()), nullptr,
-                           VarName);
-}
+```c++
+class AST {
+  ...
+  /// CreateEntryBlockAlloca - Create an alloca instruction in the entry block
+  /// of the function.  This is used for mutable variables etc.
+  static llvm::AllocaInst *CreateEntryBlockAlloca(llvm::Function *TheFunction,
+                                                  const std::string &VarName) {
+    llvm::IRBuilder<> TmpB(&TheFunction->getEntryBlock(),
+                           TheFunction->getEntryBlock().begin());
+    return TmpB.CreateAlloca(llvm::Type::getDoubleTy(getContext()), nullptr,
+                             VarName);
+  }
+};
+```
 
 This funny looking code creates an IRBuilder object that is pointing at the first instruction (.begin()) of the entry block. It then creates an alloca with the expected name and returns it. Because all values in Kaleidoscope are doubles, there is no need to pass in a type to use.
 
 With this in place, the first functionality change we want to make belongs to variable references. In our new scheme, variables live on the stack, so code generating a reference to them actually needs to produce a load from the stack slot:
 
-Value *VariableExprAST::codegen() {
+```c++
+llvm::Value *VariableExprAST::codegen() {
   // Look this variable up in the function.
-  AllocaInst *A = getNamedValues()[Name];
-  if (!A)
-    return LogErrorV("Unknown variable name");
+  llvm::AllocaInst *V = getNamedValues()[Name];
+  if (!V)
+    LogErrorV("Unknown variable name");
 
-  // Load the value.
-  return getBuilder().CreateLoad(A->getAllocatedType(), A, Name.c_str());
+  return getBuilder().CreateLoad(V->getAllocatedType(), V, Name.c_str());
 }
+```
 
-As you can see, this is pretty straightforward. Now we need to update the things that define the variables to set up the alloca. We’ll start with ForExprAST::codegen() (see the full code listing for the unabridged code):
+As you can see, this is pretty straightforward. Now we need to update the things that define the variables to set up the alloca. We’ll start with `ForExprAST::codegen()` (see the full code listing for the unabridged code):
 
-Function *TheFunction = getBuilder().GetInsertBlock()->getParent();
+```c++
+  llvm::Function *TheFunction = getBuilder().GetInsertBlock()->getParent();
+  // Create an alloca for the variable in the entry block.
+  llvm::AllocaInst *Alloca = CreateEntryBlockAlloca(TheFunction, VarName);
 
-// Create an alloca for the variable in the entry block.
-AllocaInst *Alloca = CreateEntryBlockAlloca(TheFunction, VarName);
+  llvm::BasicBlock *LoopBB =
+      llvm::BasicBlock::Create(getContext(), "loop", TheFunction);
 
-// Emit the start code first, without 'variable' in scope.
-Value *StartVal = Start->codegen();
-if (!StartVal)
-  return nullptr;
+  // Emit the start code first, without 'variable' in scope.
+  llvm::Value *StartVal = Start->codegen();
+  if (!StartVal)
+    return nullptr;
+  getBuilder().CreateStore(StartVal, Alloca);
 
-// Store the value into the alloca.
-getBuilder().CreateStore(StartVal, Alloca);
+  ...
+  // Compute the end condition.
+  llvm::Value *EndCond = End->codegen();
+  if (!EndCond)
+    return nullptr;
+
+  // Reload, increment, and restore the alloca.  This handles the case where
+  // the body of the loop mutates the variable.
+  llvm::Value *CurVar = getBuilder().CreateLoad(Alloca->getAllocatedType(),
+                                                Alloca, VarName.c_str());
+  llvm::Value *NextVar = getBuilder().CreateFAdd(CurVar, StepVal, "nextvar");
+  getBuilder().CreateStore(NextVar, Alloca);
 ...
+```
 
-// Compute the end condition.
-Value *EndCond = End->codegen();
-if (!EndCond)
-  return nullptr;
-
-// Reload, increment, and restore the alloca.  This handles the case where
-// the body of the loop mutates the variable.
-Value *CurVar = getBuilder().CreateLoad(Alloca->getAllocatedType(), Alloca,
-                                    VarName.c_str());
-Value *NextVar = getBuilder().CreateFAdd(CurVar, StepVal, "nextvar");
-getBuilder().CreateStore(NextVar, Alloca);
-...
-
-This code is virtually identical to the code before we allowed mutable variables. The big difference is that we no longer have to construct a PHI node, and we use load/store to access the variable as needed.
+This code is virtually identical to the code before we allowed mutable variables. The big difference is that we no longer have to construct a `PHI` node, and we use load/store to access the variable as needed.
 
 To support mutable argument variables, we need to also make allocas for them. The code for this is also pretty simple:
 
+```c++
 Function *FunctionAST::codegen() {
   ...
   getBuilder().SetInsertPoint(BB);
 
   // Record the function arguments in the NamedValues map.
-  NamedValues.clear();
+  getNamedValues().clear();
   for (auto &Arg : TheFunction->args()) {
     // Create an alloca for this variable.
-    AllocaInst *Alloca = CreateEntryBlockAlloca(TheFunction, Arg.getName());
+    llvm::AllocaInst *Alloca =
+        CreateEntryBlockAlloca(TheFunction, std::string(Arg.getName()));
 
     // Store the initial value into the alloca.
     getBuilder().CreateStore(&Arg, Alloca);
@@ -1932,23 +1942,131 @@ Function *FunctionAST::codegen() {
     getNamedValues()[std::string(Arg.getName())] = Alloca;
   }
 
-  if (Value *RetVal = Body->codegen()) {
+  if (llvm::Value *RetVal = Body->codegen()) {
     ...
+```
 
-For each argument, we make an alloca, store the input value to the function into the alloca, and register the alloca as the memory location for the argument. This method gets invoked by FunctionAST::codegen() right after it sets up the entry block for the function.
+For each argument, we make an alloca, store the input value to the function into the alloca, and register the alloca as the memory location for the argument. This method gets invoked by `FunctionAST::codegen()` right after it sets up the entry block for the function.
 
-The final missing piece is adding the mem2reg pass, which allows us to get good codegen once again:
+To add the passes, we need to create managers for them first. This is done in the `Optimizer` class:
 
-// Promote allocas to registers.
-TheFPM->add(createPromoteMemoryToRegisterPass());
-// Do simple "peephole" optimizations and bit-twiddling optzns.
-TheFPM->add(createInstructionCombiningPass());
-// Reassociate expressions.
-TheFPM->add(createReassociatePass());
-...
+```c++
+class Optimizer {
+public:
+  static llvm::FunctionPassManager &getFPM();
 
-It is interesting to see what the code looks like before and after the mem2reg optimization runs. For example, this is the before/after code for our recursive fib function. Before the optimization:
+  static llvm::LoopAnalysisManager &getLAM();
 
+  static llvm::FunctionAnalysisManager &getFAM();
+
+  static llvm::CGSCCAnalysisManager &getCGAM();
+
+  static llvm::ModuleAnalysisManager &getMAM();
+
+  static llvm::PassInstrumentationCallbacks &getPIC();
+
+  static llvm::StandardInstrumentations &getSI();
+};
+
+llvm::FunctionPassManager &Optimizer::getFPM() {
+  static std::unique_ptr<llvm::FunctionPassManager> FAM =
+      std::make_unique<llvm::FunctionPassManager>();
+  return *FAM;
+}
+
+llvm::LoopAnalysisManager &Optimizer::getLAM() {
+  static std::unique_ptr<llvm::LoopAnalysisManager> LAM =
+      std::make_unique<llvm::LoopAnalysisManager>();
+  return *LAM;
+}
+
+llvm::FunctionAnalysisManager &Optimizer::getFAM() {
+  static std::unique_ptr<llvm::FunctionAnalysisManager> FAM =
+      std::make_unique<llvm::FunctionAnalysisManager>();
+  return *FAM;
+}
+
+llvm::CGSCCAnalysisManager &Optimizer::getCGAM() {
+  static std::unique_ptr<llvm::CGSCCAnalysisManager> CGAM =
+      std::make_unique<llvm::CGSCCAnalysisManager>();
+  return *CGAM;
+}
+
+llvm::ModuleAnalysisManager &Optimizer::getMAM() {
+  static std::unique_ptr<llvm::ModuleAnalysisManager> MAM =
+      std::make_unique<llvm::ModuleAnalysisManager>();
+  return *MAM;
+}
+llvm::PassInstrumentationCallbacks &Optimizer::getPIC() {
+  static std::unique_ptr<llvm::PassInstrumentationCallbacks> PIC =
+      std::make_unique<llvm::PassInstrumentationCallbacks>();
+  return *PIC;
+}
+llvm::StandardInstrumentations &Optimizer::getSI() {
+  static std::unique_ptr<llvm::StandardInstrumentations> SI =
+      std::make_unique<llvm::StandardInstrumentations>(AST::getContext(),
+                                                       /*DebugLogging*/ true);
+  return *SI;
+}
+```
+
+Now we can add all the passes we want, including the `mem2reg` pass. This is done in the `InitializeModuleAndManagers` function:
+
+```c++
+void InitializeModuleAndManagers() {
+  Optimizer::getSI().registerCallbacks(Optimizer::getPIC(),
+                                       &Optimizer::getMAM());
+
+  // Do simple "peephole" optimizations and bit-twiddling optimizations.
+  // Optimizer::getFPM().addPass(llvm::InstCombinePass());
+
+  // Eliminate Common SubExpressions.
+  Optimizer::getFPM().addPass(llvm::GVNPass());
+
+  // Simplify the control flow graph (deleting unreachable blocks, etc).
+  Optimizer::getFPM().addPass(llvm::SimplifyCFGPass());
+
+  // Promote allocas to registers.
+  Optimizer::getFPM().addPass(llvm::PromotePass());
+
+  // Do simple "peephole" optimizations and bit-twiddling optimizations (again).
+  Optimizer::getFPM().addPass(
+      llvm::InstCombinePass()); // Changed from InstructionCombiningPass
+
+  // Reassociate expressions (again).
+  Optimizer::getFPM().addPass(llvm::ReassociatePass());
+
+  // Register analysis passes used in these transform passes.
+  llvm::PassBuilder PB;
+  PB.registerModuleAnalyses(Optimizer::getMAM());
+  PB.registerFunctionAnalyses(Optimizer::getFAM());
+  PB.crossRegisterProxies(Optimizer::getLAM(), Optimizer::getFAM(),
+                          Optimizer::getCGAM(), Optimizer::getMAM());
+}
+```
+
+Don't forget to call it:
+
+```c++
+int main() {
+  auto tok = *Tokenizer::GetInstance();
+  // Install standard binary operators.
+  // 1 is lowest precedence.
+  tok['='] = 2;
+  tok['<'] = 10;
+  tok['+'] = 20;
+  tok['-'] = 20;
+  tok['*'] = 40; // highest.
+
+  // Prime the first token.
+  fprintf(stderr, "ready> ");
+  InitializeModuleAndManagers();
+
+```
+
+It is interesting to see what the code looks like before and after the `mem2reg` optimization runs. For example, this is the before/after code for our recursive fib function. Before the optimization:
+
+```
 define double @fib(double %x) {
 entry:
   %x1 = alloca double
@@ -1976,11 +2094,13 @@ ifcont:     ; preds = %else, %then
   %iftmp = phi double [ 1.000000e+00, %then ], [ %addtmp, %else ]
   ret double %iftmp
 }
+```
 
 Here there is only one variable (x, the input argument) but you can still see the extremely simple-minded code generation strategy we are using. In the entry block, an alloca is created, and the initial input value is stored into it. Each reference to the variable does a reload from the stack. Also, note that we didn’t modify the if/then/else expression, so it still inserts a PHI node. While we could make an alloca for it, it is actually easier to create a PHI node for it, so we still just make the PHI.
 
 Here is the code after the mem2reg pass runs:
 
+```
 define double @fib(double %x) {
 entry:
   %cmptmp = fcmp ult double %x, 3.000000e+00
@@ -2003,11 +2123,13 @@ ifcont:     ; preds = %else, %then
   %iftmp = phi double [ 1.000000e+00, %then ], [ %addtmp, %else ]
   ret double %iftmp
 }
+```
 
-This is a trivial case for mem2reg, since there are no redefinitions of the variable. The point of showing this is to calm your tension about inserting such blatant inefficiencies :).
+This is a trivial case for `mem2reg`, since there are no redefinitions of the variable. The point of showing this is to calm your tension about inserting such blatant inefficiencies :).
 
 After the rest of the optimizers run, we get:
 
+```
 define double @fib(double %x) {
 entry:
   %cmptmp = fcmp ult double %x, 3.000000e+00
@@ -2026,8 +2148,9 @@ else:
 ifcont:
   ret double 1.000000e+00
 }
+```
 
-Here we see that the simplifycfg pass decided to clone the return instruction into the end of the ‘else’ block. This allowed it to eliminate some branches and the PHI node.
+Here we see that the simplifycfg pass decided to clone the return instruction into the end of the `else` block. This allowed it to eliminate some branches and the `PHI` node.
 
 Now that all symbol table references are updated to use stack variables, we’ll add the assignment operator.
 
@@ -2035,44 +2158,51 @@ Now that all symbol table references are updated to use stack variables, we’ll
 
 With our current framework, adding a new assignment operator is really simple. We will parse it just like any other binary operator, but handle it internally (instead of allowing the user to define it). The first step is to set a precedence:
 
+```c++
 int main() {
   // Install standard binary operators.
   // 1 is lowest precedence.
-  BinopPrecedence['='] = 2;
-  BinopPrecedence['<'] = 10;
-  BinopPrecedence['+'] = 20;
-  BinopPrecedence['-'] = 20;
+  tok['='] = 2;
+  tok['<'] = 10;
+  tok['+'] = 20;
+  tok['-'] = 20;
+  tok['*'] = 40; // highest.
+```
 
 Now that the parser knows the precedence of the binary operator, it takes care of all the parsing and AST generation. We just need to implement codegen for the assignment operator. This looks like:
 
-Value *BinaryExprAST::codegen() {
+```c++
+llvm::Value *BinaryExprAST::codegen() {
   // Special case '=' because we don't want to emit the LHS as an expression.
   if (Op == '=') {
     // This assume we're building without RTTI because LLVM builds that way by
     // default. If you build LLVM with RTTI this can be changed to a
     // dynamic_cast for automatic error checking.
-    VariableExprAST *LHSE = static_cast<VariableExprAST*>(LHS.get());
+    auto *LHSE = static_cast<VariableExprAST *>(LHS.get());
     if (!LHSE)
       return LogErrorV("destination of '=' must be a variable");
+```
 
-Unlike the rest of the binary operators, our assignment operator doesn’t follow the “emit LHS, emit RHS, do computation” model. As such, it is handled as a special case before the other binary operators are handled. The other strange thing is that it requires the LHS to be a variable. It is invalid to have “(x+1) = expr” - only things like “x = expr” are allowed.
+Unlike the rest of the binary operators, our assignment operator doesn’t follow the “emit LHS, emit RHS, do computation” model. As such, it is handled as a special case before the other binary operators are handled. The other strange thing is that it requires the LHS to be a variable. It is invalid to have `(x+1) = expr` - only things like `x = expr` are allowed.
 
-  // Codegen the RHS.
-  Value *Val = RHS->codegen();
-  if (!Val)
-    return nullptr;
+```c++
+    // Codegen the RHS.
+    llvm::Value *Val = RHS->codegen();
+    if (!Val)
+      return nullptr;
 
-  // Look up the name.
-  Value *Variable = getNamedValues()[LHSE->getName()];
-  if (!Variable)
-    return LogErrorV("Unknown variable name");
+    // Look up the name.
+    llvm::Value *Variable = getNamedValues()[LHSE->getName()];
+    if (!Variable)
+      return LogErrorV("Unknown variable name");
 
-  getBuilder().CreateStore(Val, Variable);
-  return Val;
-}
+    getBuilder().CreateStore(Val, Variable);
+    return Val;
+  }
 ...
+```
 
-Once we have the variable, codegen’ing the assignment is straightforward: we emit the RHS of the assignment, create a store, and return the computed value. Returning a value allows for chained assignments like “X = (Y = Z)”.
+Once we have the variable, codegen’ing the assignment is straightforward: we emit the RHS of the assignment, create a store, and return the computed value. Returning a value allows for chained assignments like `X = (Y = Z)`.
 
 Now that we have an assignment operator, we can mutate loop variables and arguments. For example, we can now run code like this:
 
@@ -2096,50 +2226,63 @@ When run, this example prints “123” and then “4”, showing that we did ac
 
 #### 7.7. User-defined Local Variables
 
-Adding var/in is just like any other extension we made to Kaleidoscope: we extend the lexer, the parser, the AST and the code generator. The first step for adding our new ‘var/in’ construct is to extend the lexer. As before, this is pretty trivial, the code looks like this:
+Adding var/in is just like any other extension we made to Kaleidoscope: we extend the lexer, the parser, the AST and the code generator. The first step for adding our new `var/in` construct is to extend the lexer. As before, this is pretty trivial, the code looks like this:
 
+```c++
 enum Token {
   ...
   // var definition
-  tok_var = -13
+  Var = -11
 ...
 }
 ...
 static int gettok() {
 ...
+    if (IdentifierStr == "def")
+      return Def;
+    if (IdentifierStr == "extern")
+      return Extern;
+    if (IdentifierStr == "if")
+      return If;
+    if (IdentifierStr == "then")
+      return Then;
+    if (IdentifierStr == "else")
+      return Else;
+    if (IdentifierStr == "for")
+      return For;
     if (IdentifierStr == "in")
-      return tok_in;
-    if (IdentifierStr == "binary")
-      return tok_binary;
-    if (IdentifierStr == "unary")
-      return tok_unary;
+      return In;
     if (IdentifierStr == "var")
-      return tok_var;
-    return tok_identifier;
+      return Var;
+
+    return Identifier;
+  }
 ...
+```
 
 The next step is to define the AST node that we will construct. For var/in, it looks like this:
 
-```
+```c++
 /// VarExprAST - Expression class for var/in
 class VarExprAST : public ExprAST {
   std::vector<std::pair<std::string, std::unique_ptr<ExprAST>>> VarNames;
   std::unique_ptr<ExprAST> Body;
 
 public:
-  VarExprAST(std::vector<std::pair<std::string, std::unique_ptr<ExprAST>>> VarNames,
-             std::unique_ptr<ExprAST> Body)
-    : VarNames(std::move(VarNames)), Body(std::move(Body)) {}
+  VarExprAST(
+      std::vector<std::pair<std::string, std::unique_ptr<ExprAST>>> VarNames,
+      std::unique_ptr<ExprAST> Body)
+      : VarNames(std::move(VarNames)), Body(std::move(Body)) {}
 
-  Value *codegen() override;
+  llvm::Value *codegen() override;
 };
 ```
 
-var/in allows a list of names to be defined all at once, and each name can optionally have an initializer value. As such, we capture this information in the VarNames vector. Also, var/in has a body, this body is allowed to access the variables defined by the var/in.
+`var/in` allows a list of names to be defined all at once, and each name can optionally have an initializer value. As such, we capture this information in the `VarNames` vector. Also, `var/in` has a body, this body is allowed to access the variables defined by the `var/in`.
 
 With this in place, we can define the parser pieces. The first thing we do is add it as a primary expression:
 
-```
+```c++
 /// primary
 ///   ::= identifierexpr
 ///   ::= numberexpr
@@ -2147,137 +2290,139 @@ With this in place, we can define the parser pieces. The first thing we do is ad
 ///   ::= ifexpr
 ///   ::= forexpr
 ///   ::= varexpr
-static std::unique_ptr<ExprAST> ParsePrimary() {
+std::unique_ptr<ExprAST> Tokenizer::ParsePrimary() {
   switch (CurTok) {
-  default:
-    return LogError("unknown token when expecting an expression");
-  case tok_identifier:
+  case Identifier:
     return ParseIdentifierExpr();
-  case tok_number:
+  case Number:
     return ParseNumberExpr();
   case '(':
     return ParseParenExpr();
-  case tok_if:
+  case If:
     return ParseIfExpr();
-  case tok_for:
+  case For:
     return ParseForExpr();
-  case tok_var:
+  case Var:
     return ParseVarExpr();
+
+  default:
+    return LogError("unknown token when expecting an expression");
   }
 }
 ```
 
-Next we define ParseVarExpr:
+Next we define `ParseVarExpr`:
 
-```
+```c++
 /// varexpr ::= 'var' identifier ('=' expression)?
 //                    (',' identifier ('=' expression)?)* 'in' expression
-static std::unique_ptr<ExprAST> ParseVarExpr() {
-  getNextToken();  // eat the var.
+std::unique_ptr<ExprAST> Tokenizer::ParseVarExpr() {
+  GetNextToken(); // eat the var.
 
   std::vector<std::pair<std::string, std::unique_ptr<ExprAST>>> VarNames;
 
   // At least one variable name is required.
-  if (CurTok != tok_identifier)
+  if (CurTok != Identifier)
     return LogError("expected identifier after var");
 ```
 
-The first part of this code parses the list of identifier/expr pairs into the local VarNames vector.
+The first part of this code parses the list of identifier/expr pairs into the local `VarNames` vector.
 
-```
-while (true) {
-  std::string Name = IdentifierStr;
-  getNextToken();  // eat identifier.
+```c++
+  while (true) {
+    std::string Name = IdentifierStr;
+    GetNextToken(); // eat identifier.
 
-  // Read the optional initializer.
-  std::unique_ptr<ExprAST> Init;
-  if (CurTok == '=') {
-    getNextToken(); // eat the '='.
+    // Read the optional initializer.
+    std::unique_ptr<ExprAST> Init;
+    if (CurTok == '=') {
+      GetNextToken(); // eat the '='.
 
-    Init = ParseExpression();
-    if (!Init) return nullptr;
+      Init = ParseExpression();
+      if (!Init)
+        return nullptr;
+    }
+
+    VarNames.emplace_back(Name, std::move(Init));
+
+    // End of var list, exit loop.
+    if (CurTok != ',')
+      break;
+    GetNextToken(); // eat the ','.
+
+    if (CurTok != Identifier)
+      return LogError("expected identifier list after var");
   }
-
-  VarNames.push_back(std::make_pair(Name, std::move(Init)));
-
-  // End of var list, exit loop.
-  if (CurTok != ',') break;
-  getNextToken(); // eat the ','.
-
-  if (CurTok != tok_identifier)
-    return LogError("expected identifier list after var");
-}
 ```
 
 Once all the variables are parsed, we then parse the body and create the AST node:
 
-```
+```c++
   // At this point, we have to have 'in'.
-  if (CurTok != tok_in)
+  if (CurTok != In)
     return LogError("expected 'in' keyword after 'var'");
-  getNextToken();  // eat 'in'.
+  GetNextToken(); // eat 'in'.
 
   auto Body = ParseExpression();
   if (!Body)
     return nullptr;
 
-  return std::make_unique<VarExprAST>(std::move(VarNames),
-                                       std::move(Body));
+  return std::make_unique<VarExprAST>(std::move(VarNames), std::move(Body));
 }
 ```
 
 Now that we can parse and represent the code, we need to support emission of LLVM IR for it. This code starts out with:
 
-```
-Value *VarExprAST::codegen() {
-  std::vector<AllocaInst *> OldBindings;
+```c++
+llvm::Value *VarExprAST::codegen() {
+  std::vector<llvm::AllocaInst *> OldBindings;
 
-  Function *TheFunction = getBuilder().GetInsertBlock()->getParent();
+  llvm::Function *TheFunction = getBuilder().GetInsertBlock()->getParent();
 
   // Register all variables and emit their initializer.
-  for (unsigned i = 0, e = VarNames.size(); i != e; ++i) {
-    const std::string &VarName = VarNames[i].first;
-    ExprAST *Init = VarNames[i].second.get();
+  for (auto &Var : VarNames) {
+    const std::string &VarName = Var.first;
+    ExprAST *Init = Var.second.get();
 ```
 
 
 Basically it loops over all the variables, installing them one at a time. For each variable we put into the symbol table, we remember the previous value that we replace in OldBindings.
 
-```
-  // Emit the initializer before adding the variable to scope, this prevents
-  // the initializer from referencing the variable itself, and permits stuff
-  // like this:
-  //  var a = 1 in
-  //    var a = a in ...   # refers to outer 'a'.
-  Value *InitVal;
-  if (Init) {
-    InitVal = Init->codegen();
-    if (!InitVal)
-      return nullptr;
-  } else { // If not specified, use 0.0.
-    InitVal = ConstantFP::get(getContext(), APFloat(0.0));
+```c++
+    // Emit the initializer before adding the variable to scope, this prevents
+    // the initializer from referencing the variable itself, and permits stuff
+    // like this:
+    //  var a = 1 in
+    //    var a = a in ...   # refers to outer 'a'.
+    llvm::Value *InitVal;
+
+    if (Init) {
+      InitVal = Init->codegen();
+      if (!InitVal)
+        return nullptr;
+    } else { // If not specified, use 0.0.
+      InitVal = llvm::ConstantFP::get(getContext(), llvm::APFloat(0.0));
+    }
+
+    llvm::AllocaInst *Alloca = CreateEntryBlockAlloca(TheFunction, VarName);
+    getBuilder().CreateStore(InitVal, Alloca);
+
+    // Remember the old variable binding so that we can restore the binding when
+    // we unrecurse.
+    OldBindings.push_back(getNamedValues()[VarName]);
+
+    // Remember this binding.
+    getNamedValues()[VarName] = Alloca;
   }
-
-  AllocaInst *Alloca = CreateEntryBlockAlloca(TheFunction, VarName);
-  getBuilder().CreateStore(InitVal, Alloca);
-
-  // Remember the old variable binding so that we can restore the binding when
-  // we unrecurse.
-  OldBindings.push_back(getNamedValues()[VarName]);
-
-  // Remember this binding.
-  getNamedValues()[VarName] = Alloca;
-}
 ```
 
-There are more comments here than code. The basic idea is that we emit the initializer, create the alloca, then update the symbol table to point to it. Once all the variables are installed in the symbol table, we evaluate the body of the var/in expression:
+There are more comments here than code. The basic idea is that we emit the initializer, create the alloca, then update the symbol table to point to it. Once all the variables are installed in the symbol table, we evaluate the body of the `var/in` expression:
 
-// Codegen the body, now that all vars are in scope.
-Value *BodyVal = Body->codegen();
-if (!BodyVal)
-  return nullptr;
-
-Finally, before returning, we restore the previous variable bindings:
+```c++
+  // Codegen the body, now that all vars are in scope.
+  llvm::Value *BodyVal = Body->codegen();
+  if (!BodyVal)
+    return nullptr;
 
   // Pop all our variables from scope.
   for (unsigned i = 0, e = VarNames.size(); i != e; ++i)
@@ -2286,27 +2431,27 @@ Finally, before returning, we restore the previous variable bindings:
   // Return the body computation.
   return BodyVal;
 }
+```
 
 The end result of all of this is that we get properly scoped variable definitions, and we even (trivially) allow mutation of them :).
 
-With this, we completed what we set out to do. Our nice iterative fib example from the intro compiles and runs just fine. The mem2reg pass optimizes all of our stack variables into SSA registers, inserting PHI nodes where needed, and our front-end remains simple: no “iterated dominance frontier” computation anywhere in sight.
+With this, we completed what we set out to do. Our nice iterative fib example from the intro compiles and runs just fine. The `mem2reg` pass optimizes all of our stack variables into SSA registers, inserting PHI nodes where needed, and our front-end remains simple: no “iterated dominance frontier” computation anywhere in sight.
 
 
 ### Chapter 8: Compiling to Object Files
-
+=============================
 
 *We explain how to compile LLVM IR down to object files, similar to the process in a static compiler.*
-
-
 
 #### 8.1. Chapter 8 Introduction
 
 Welcome to Chapter 8 of the “Implementing a language with LLVM” tutorial. This chapter describes how to compile our language down to object files.
+
 #### 8.2. Choosing a target
 
 LLVM has native support for cross-compilation. You can compile to the architecture of your current machine, or just as easily compile for other architectures. In this tutorial, we’ll target the current machine.
 
-To specify the architecture that you want to target, we use a string called a “target triple”. This takes the form <arch><sub>-<vendor>-<sys>-<abi> (see the cross compilation docs).
+To specify the architecture that you want to target, we use a string called a “target triple”. This takes the form `<arch><sub>-<vendor>-<sys>-<abi>` (see the cross compilation docs).
 
 As an example, we can see what clang thinks is our current target triple:
 
@@ -2319,31 +2464,32 @@ Running this command may show something different on your machine as you might b
 
 Fortunately, we don’t need to hard-code a target triple to target the current machine. LLVM provides sys::getDefaultTargetTriple, which returns the target triple of the current machine.
 
-```
-auto TargetTriple = sys::getDefaultTargetTriple();
+```c++
+auto TargetTriple = llvm::sys::getDefaultTargetTriple();
 ```
 
 LLVM doesn’t require us to link in all the target functionality. For example, if we’re just using the JIT, we don’t need the assembly printers. Similarly, if we’re only targeting certain architectures, we can only link in the functionality for those architectures.
 
 For this example, we’ll initialize all the targets for emitting object code.
 
+```c++
+llvm::InitializeAllTargetInfos();
+llvm::InitializeAllTargets();
+llvm::InitializeAllTargetMCs();
+llvm::InitializeAllAsmParsers();
+llvm::InitializeAllAsmPrinters();
 ```
-InitializeAllTargetInfos();
-InitializeAllTargets();
-InitializeAllTargetMCs();
-InitializeAllAsmParsers();
-InitializeAllAsmPrinters();
-
 We can now use our target triple to get a Target:
 
+```c++
 std::string Error;
-auto Target = TargetRegistry::lookupTarget(TargetTriple, Error);
+auto Target = llvm::TargetRegistry::lookupTarget(TargetTriple, Error);
 
 // Print an error and exit if we couldn't find the requested target.
 // This generally occurs if we've forgotten to initialise the
 // TargetRegistry or we have a bogus target triple.
 if (!Target) {
-  errs() << Error;
+  llvm::errs() << Error;
   return 1;
 }
 ```
@@ -2374,62 +2520,74 @@ Available features for this target:
 
 For our example, we’ll use the generic CPU without any additional feature or target option.
 
-```
+```c++
 auto CPU = "generic";
 auto Features = "";
 
-TargetOptions opt;
-auto TargetMachine = Target->createTargetMachine(TargetTriple, CPU, Features, opt, Reloc::PIC_);
+llvm::TargetOptions opt;
+auto TargetMachine = Target->createTargetMachine(TargetTriple, CPU, Features,
+                                                 opt, llvm::Reloc::PIC_);
 ```
 
 #### 8.4. Configuring the Module
 
 We’re now ready to configure our module, to specify the target and data layout. This isn’t strictly necessary, but the frontend performance guide recommends this. Optimizations benefit from knowing about the target and data layout.
 
-TheModule->setDataLayout(TargetMachine->createDataLayout());
-TheModule->setTargetTriple(TargetTriple);
+```c++
+AST::getModule().setDataLayout(TargetMachine->createDataLayout());
+AST::getModule().setTargetTriple(TargetTriple);
+```
 
 #### 8.5. Emit Object Code
 
 We’re ready to emit object code! Let’s define where we want to write our file to:
 
+```c++
 auto Filename = "output.o";
 std::error_code EC;
-raw_fd_ostream dest(Filename, EC, sys::fs::OF_None);
+llvm::raw_fd_ostream dest(Filename, EC, llvm::sys::fs::OF_None);
 
 if (EC) {
-  errs() << "Could not open file: " << EC.message();
+  llvm::errs() << "Could not open file: " << EC.message();
   return 1;
 }
+```
 
 Finally, we define a pass that emits object code, then we run that pass:
 
-legacy::PassManager pass;
-auto FileType = CodeGenFileType::ObjectFile;
+```c++
+llvm::legacy::PassManager pass;
+auto FileType = llvm::CodeGenFileType::ObjectFile;
 
 if (TargetMachine->addPassesToEmitFile(pass, dest, nullptr, FileType)) {
-  errs() << "TargetMachine can't emit a file of this type";
+  llvm::errs() << "TargetMachine can't emit a file of this type";
   return 1;
 }
 
-pass.run(*TheModule);
+pass.run(AST::getModule());
 dest.flush();
+```
 
 #### 8.6. Putting It All Together
 
 Does it work? Let’s give it a try. We need to compile our code, but note that the arguments to llvm-config are different to the previous chapters.
 
+```
 $ clang++ -g -O3 toy.cpp `llvm-config --cxxflags --ldflags --system-libs --libs all` -o toy
+```
 
 Let’s run it, and define a simple average function. Press Ctrl-D when you’re done.
 
+```
 $ ./toy
 ready> def average(x y) (x + y) * 0.5;
 ^D
 Wrote output.o
+```
 
 We have an object file! To test it, let’s write a simple program and link it with our output. Here’s the source code:
 
+```c++
 #include <iostream>
 
 extern "C" {
@@ -2439,20 +2597,29 @@ extern "C" {
 int main() {
     std::cout << "average of 3.0 and 4.0: " << average(3.0, 4.0) << std::endl;
 }
+```
 
 We link our program to output.o and check the result is what we expected:
 
+```
 $ clang++ main.cpp output.o -o main
 $ ./main
 average of 3.0 and 4.0: 3.5
-
+```
 
 ## Installation
-TODO (but also is not that relevant)
+If you want to run the "repl" and have a look at generated code:
+ - `git clone https://github.com/commander-trashdin/Trashscope.git`
+ - `cd Trashscope`
+ - `cmake . && make`
+ - `./interactive`
 
+This also generates an object file "output.o" with all the code.
 
 ## Contributing
 Feel free to expand this with more chapters, more explanations, etc. However, I would only accept changes that either do not require changing code at all, or come with all the necessary code changes.
+
+In the meantime, I am working on updating the whole tutorial at the llvm repo itself.
 
 ## Acknowledgments
 
@@ -2460,7 +2627,6 @@ This project is based on the ["My First Language Frontend with LLVM"](https://ll
 Changes Made:
 - Skipped Chapters 4, 6, 9, and 10 for now.
 - Adapted and modified the content to fit the scope of this project.
-- Added new features and explanations in Chapters 5 and 7.
 
 Original Source:
     LLVM Project: https://llvm.org/
